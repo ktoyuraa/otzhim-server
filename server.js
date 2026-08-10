@@ -19,6 +19,31 @@ let waiting = null;             // игрок в очереди быстрой �
 const rooms = new Map();        // code -> {a, b, startedAt, ended}
 let served = 0;                 // сколько боёв свели за всё время
 
+/* ── тени: записи прошлых забегов ──────────────────────────── */
+const GHOST_MAX = 800;          // больше не храним, вытесняем старые
+const ghosts = [];              // {reps, times:[сек...], lvl, at}
+
+function addGhost(g) {
+  if (!g || !Array.isArray(g.times)) return;
+  const reps = Math.max(0, g.reps | 0);
+  if (reps < 5 || reps > 200) return;               // мусор не берём
+  const times = g.times
+    .map(Number).filter(t => t >= 0 && t <= 120)
+    .sort((a, b) => a - b).slice(0, 200);
+  if (times.length < 5) return;
+  ghosts.push({ reps: times.length, times, lvl: Math.max(1, g.lvl | 0) || 1, at: Date.now() });
+  if (ghosts.length > GHOST_MAX) ghosts.shift();
+}
+
+/* подбираем тень под силу игрока: сначала близкие, иначе любую */
+function pickGhost(best) {
+  if (!ghosts.length) return null;
+  const b = Math.max(1, best | 0) || 12;
+  const near = ghosts.filter(g => g.reps >= b * 0.6 && g.reps <= b * 1.5);
+  const pool = near.length ? near : ghosts;
+  return pool[(Math.random() * pool.length) | 0];
+}
+
 const code5 = () => Array.from({length:5}, () => ABC[Math.random()*ABC.length|0]).join('');
 const send = (ws, o) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); };
 
@@ -32,6 +57,7 @@ const http_ = http.createServer((req, res) => {
       queue: waiting ? 1 : 0,
       rooms: rooms.size,
       duels: served,
+      ghosts: ghosts.length,
       uptime: Math.round(process.uptime())
     }));
   }
@@ -166,6 +192,20 @@ wss.on('connection', ws => {
           const foe = foeOf(p);
           if (!foe || foe.done) finish(room);
         }
+        break;
+      }
+
+      /* прислали запись своего забега */
+      case 'ghost': {
+        addGhost(m);
+        break;
+      }
+
+      /* живого нет — просим чужую запись */
+      case 'ghostreq': {
+        const g = pickGhost(m.best);
+        if (g) send(ws, { t: 'ghost', reps: g.reps, times: g.times, lvl: g.lvl });
+        else   send(ws, { t: 'noghost' });
         break;
       }
 
