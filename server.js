@@ -19,6 +19,56 @@ let waiting = null;             // игрок в очереди быстрой �
 const rooms = new Map();        // code -> {a, b, startedAt, ended}
 let served = 0;                 // сколько боёв свели за всё время
 
+/* ── профили игроков ───────────────────────────────────────── */
+const fs = require('fs');
+const STORE = process.env.STORE || '/tmp/otzhim-data.json';
+const profiles = new Map();     // id -> {id,name,total,best,xp,streak,lastDay,at}
+
+const clean = (v, max) => String(v == null ? '' : v).slice(0, max);
+
+function saveProfile(p) {
+  if (!p || !p.id) return null;
+  const id = clean(p.id, 12).toUpperCase();
+  const cur = profiles.get(id) || { id, name: 'Игрок', total: 0, best: 0, xp: 0, streak: 0 };
+  const merged = {
+    id,
+    name:    clean(p.name || cur.name, 16) || 'Игрок',
+    total:   Math.max(cur.total  | 0, Math.min(p.total  | 0, 5e6)),
+    best:    Math.max(cur.best   | 0, Math.min(p.best   | 0, 500)),
+    xp:      Math.max(cur.xp     | 0, Math.min(p.xp     | 0, 5e6)),
+    streak:  Math.max(cur.streak | 0, Math.min(p.streak | 0, 3650)),
+    lastDay: clean(p.lastDay || cur.lastDay || '', 10),
+    at: Date.now()
+  };
+  profiles.set(id, merged);
+  return merged;
+}
+
+function topList() {
+  const all = [...profiles.values()];
+  const by = k => all.slice().sort((a, b) => b[k] - a[k]).slice(0, 20)
+    .map(p => ({ name: p.name, total: p.total, best: p.best, streak: p.streak }));
+  return { total: by('total'), best: by('best'), streak: by('streak') };
+}
+
+/* снимок на диск: переживает перезапуск процесса, но не пересборку */
+function dump() {
+  try {
+    fs.writeFileSync(STORE, JSON.stringify({
+      profiles: [...profiles.values()],
+      ghosts: ghosts.slice(-300)
+    }));
+  } catch (e) {}
+}
+function restore() {
+  try {
+    const d = JSON.parse(fs.readFileSync(STORE, 'utf8'));
+    (d.profiles || []).forEach(p => profiles.set(p.id, p));
+    (d.ghosts || []).forEach(g => ghosts.push(g));
+    console.log('восстановлено профилей: ' + profiles.size + ', записей: ' + ghosts.length);
+  } catch (e) {}
+}
+
 /* ── тени: записи прошлых забегов ──────────────────────────── */
 const GHOST_MAX = 800;          // больше не храним, вытесняем старые
 const ghosts = [];              // {reps, times:[сек...], lvl, at}
@@ -31,7 +81,8 @@ function addGhost(g) {
     .map(Number).filter(t => t >= 0 && t <= 120)
     .sort((a, b) => a - b).slice(0, 200);
   if (times.length < 5) return;
-  ghosts.push({ reps: times.length, times, lvl: Math.max(1, g.lvl | 0) || 1, at: Date.now() });
+  ghosts.push({ reps: times.length, times, lvl: Math.max(1, g.lvl | 0) || 1,
+                name: clean(g.name || 'Игрок', 16), at: Date.now() });
   if (ghosts.length > GHOST_MAX) ghosts.shift();
 }
 
@@ -58,6 +109,7 @@ const http_ = http.createServer((req, res) => {
       rooms: rooms.size,
       duels: served,
       ghosts: ghosts.length,
+      players: profiles.size,
       uptime: Math.round(process.uptime())
     }));
   }
@@ -204,8 +256,29 @@ wss.on('connection', ws => {
       /* живого нет — просим чужую запись */
       case 'ghostreq': {
         const g = pickGhost(m.best);
-        if (g) send(ws, { t: 'ghost', reps: g.reps, times: g.times, lvl: g.lvl });
+        if (g) send(ws, { t: 'ghost', reps: g.reps, times: g.times, lvl: g.lvl, name: g.name || 'Игрок' });
         else   send(ws, { t: 'noghost' });
+        break;
+      }
+
+      /* сохранить профиль */
+      case 'save': {
+        const saved = saveProfile(m);
+        if (saved) send(ws, { t: 'saved' });
+        break;
+      }
+
+      /* забрать профиль по коду восстановления */
+      case 'load': {
+        const id = clean(m.id, 12).toUpperCase();
+        const p = profiles.get(id);
+        send(ws, p ? { t: 'profile', p } : { t: 'noprofile' });
+        break;
+      }
+
+      /* таблица лидеров */
+      case 'top': {
+        send(ws, { t: 'top', ...topList() });
         break;
       }
 
@@ -239,6 +312,10 @@ setInterval(() => {
 }, 30e3);
 
 wss.on('connection', ws => { ws.isAlive = true; });
+
+restore();
+setInterval(dump, 30e3);
+process.on('SIGTERM', () => { dump(); process.exit(0); });
 
 http_.listen(PORT, () => {
   console.log('ОТЖИМ: сервер слушает порт ' + PORT);
