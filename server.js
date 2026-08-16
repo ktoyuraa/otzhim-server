@@ -19,6 +19,30 @@ let waiting = null;             // игрок в очереди быстрой �
 const rooms = new Map();        // code -> {a, b, startedAt, ended}
 let served = 0;                 // сколько боёв свели за всё время
 
+/* ── статистика воронки ────────────────────────────────────── */
+const stats = { days: {} };   // 'ГГГГ-ММ-ДД' -> {open, calib, set, duel, chal, reps, users:{}}
+
+function dayKey() { return new Date().toISOString().slice(0, 10); }
+function bump(ev, uid, n) {
+  const k = dayKey();
+  const d = stats.days[k] || (stats.days[k] = { open:0, calib:0, set:0, duel:0, chal:0, reps:0, users:{} });
+  if (ev in d) d[ev] += (n || 1);
+  if (uid) d.users[String(uid).slice(0, 12)] = 1;
+  // храним только 30 последних дней
+  const keys = Object.keys(stats.days).sort();
+  while (keys.length > 30) delete stats.days[keys.shift()];
+}
+function statsView() {
+  const out = {};
+  Object.keys(stats.days).sort().forEach(k => {
+    const d = stats.days[k];
+    out[k] = { открыли: d.open, откалибровались: d.calib, подходов: d.set,
+               боёв: d.duel, миссий: d.chal, отжиманий: d.reps,
+               уникальных: Object.keys(d.users).length };
+  });
+  return out;
+}
+
 /* ── профили игроков ───────────────────────────────────────── */
 const fs = require('fs');
 const STORE = process.env.STORE || '/tmp/otzhim-data.json';
@@ -56,6 +80,7 @@ function dump() {
   try {
     fs.writeFileSync(STORE, JSON.stringify({
       profiles: [...profiles.values()],
+      stats: stats.days,
       ghosts: ghosts.slice(-300)
     }));
   } catch (e) {}
@@ -65,6 +90,7 @@ function restore() {
     const d = JSON.parse(fs.readFileSync(STORE, 'utf8'));
     (d.profiles || []).forEach(p => profiles.set(p.id, p));
     (d.ghosts || []).forEach(g => ghosts.push(g));
+    if (d.stats) Object.assign(stats.days, d.stats);
     console.log('восстановлено профилей: ' + profiles.size + ', записей: ' + ghosts.length);
   } catch (e) {}
 }
@@ -100,6 +126,10 @@ const send = (ws, o) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(
 
 /* ── здоровье сервера, чтобы можно было проверить браузером ── */
 const http_ = http.createServer((req, res) => {
+  if (req.url === '/stats') {
+    res.writeHead(200, {'Content-Type':'application/json; charset=utf-8'});
+    return res.end(JSON.stringify(statsView(), null, 2));
+  }
   if (req.url === '/health') {
     res.writeHead(200, {'Content-Type':'application/json; charset=utf-8'});
     return res.end(JSON.stringify({
@@ -279,6 +309,15 @@ wss.on('connection', ws => {
       /* таблица лидеров */
       case 'top': {
         send(ws, { t: 'top', ...topList() });
+        break;
+      }
+
+      /* событие воронки */
+      case 'ev': {
+        const name = String(m.ev || '').slice(0, 10);
+        if (['open','calib','set','duel','chal','reps'].includes(name)) {
+          bump(name, m.id, name === 'reps' ? Math.min(500, m.n | 0) : 1);
+        }
         break;
       }
 
