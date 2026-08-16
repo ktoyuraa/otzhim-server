@@ -126,12 +126,13 @@ const send = (ws, o) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(
 
 /* ── здоровье сервера, чтобы можно было проверить браузером ── */
 const http_ = http.createServer((req, res) => {
+  const cors = { 'Access-Control-Allow-Origin': '*' };
   if (req.url === '/stats') {
-    res.writeHead(200, {'Content-Type':'application/json; charset=utf-8'});
+    res.writeHead(200, Object.assign({'Content-Type':'application/json; charset=utf-8'}, cors));
     return res.end(JSON.stringify(statsView(), null, 2));
   }
   if (req.url === '/health') {
-    res.writeHead(200, {'Content-Type':'application/json; charset=utf-8'});
+    res.writeHead(200, Object.assign({'Content-Type':'application/json; charset=utf-8'}, cors));
     return res.end(JSON.stringify({
       ok: true,
       online: wss ? wss.clients.size : 0,
@@ -146,7 +147,27 @@ const http_ = http.createServer((req, res) => {
   res.writeHead(404); res.end('otzhim');
 });
 
-const wss = new WebSocketServer({ server: http_ });
+const ALLOWED = [
+  'https://otzhim.space',
+  'https://www.otzhim.space',
+  'https://ktoyuraa.github.io',
+  'http://localhost:8080',
+  'http://127.0.0.1:8080'
+];
+function originOK(o) {
+  if (!o) return true;                       // без источника — свои же тесты
+  return ALLOWED.includes(o);
+}
+
+const wss = new WebSocketServer({
+  server: http_,
+  verifyClient: (info, done) => {
+    const o = info.origin || (info.req && info.req.headers.origin);
+    if (originOK(o)) return done(true);
+    console.log('отказ источнику: ' + o);
+    done(false, 403, 'origin not allowed');
+  }
+});
 
 /* ── свести двоих и начать бой ─────────────────────────────── */
 function pair(p1, p2, roomCode) {
